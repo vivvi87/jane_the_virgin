@@ -1,0 +1,560 @@
+---
+title: "*Jane the Virgin* Data Project: from Web Scraping, to Text Mining and Data Viz"
+# date: March 10, 2021
+output:
+  prettydoc::html_pretty:
+    theme: leonids
+    highlight: vignette
+#    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+> "If you knew anything about telenovelas, you’d know that everything is supposed to be dramatic!"
+>
+> --- Rogelio De la Vega
+
+```{r, echo = FALSE, fig.align='center'}
+knitr::include_graphics('jane-the-virgin-553970ae10d98.jpg')
+```
+
+## Inspiration
+This project has been inspired by the work of Katie Segreti and Harry Anderson (who was himself inspired by Katie's), that you can respectively find [here](https://data-chips.com/2019/04/17/web-scraping-for-broad-city-charts/) and [here](https://medium.com/epfl-extension-school/scraping-web-data-with-r-the-tidyverse-30944ca67c92).
+The idea is to web scrape data about a TV series from the web, analyze it, and produce some beautiful data visualizations with the material.
+I followed a DataCamp course on web scraping a few weeks ago, so that seemed like the perfect way to put into practice what I have learned.
+Moreover, as I have also been learning some text mining and sentiment analysis, I decided to add some of that as well to my own iteration of the project.
+
+## Jane the virgin
+The TV series I chose is *Jane the Virgin*, one of my favourites among the ones I watched in 2020 (yes, lock down resulted in a lot Netflix binge-watching - none of which I regret).
+*Jane the Virgin* is a show produced by CW, which aired in the US btween 2014 and 2019. The show is based in Miami, and is centered around a family of three latina women: Jane, her mother Xiomara and her grandmother Alba, and it follows the unfolding of their lives after Jane (who is, you guessed it, a virgin), during a gynecologist check-up, gets accidentally inseminated with the sperm of Rafael Solano, the owner of the hotel where Jane is working. The plot is based on the Venezuelan telenovela "Juana la virgen" and showcases all the main telenovela tropes and drama, so that it can be considered a true celebration of the genre, albeit done in an ironic way. 
+
+In *Jane* you can find it all: love, death, drama, crime, drug lords, evil twins, fame, success and failure - a roller coaster of emotions and bone-rattling twists with a tenseful cliff-hanger basically at the end of each episode. 
+
+But *Jane* is not only about its plot, what is actually most delightful about the show are its characters: funny, deep and relatable, each and one of them is modeled on a stereotype but layered with a complex and tri-dimenional personality, who is never completely "good" or "bad" and most of all is never trivial. Each of them goes through his/her own unique personal journey of self understanding and growth, so that the show is not only fun and intertaining, but has a deeply thought-provoking quality - for all things life, relationships, career and family.
+
+With a cast, prodcution and writer's room made up of a majority of women and latinx people, *Jane the virgin* gives us the chance to see a truly diverse representation, and especially an authenthic and non-stereotypical narration of the latino community.
+
+## Web scraping
+I scraped the data from two websites: IMDB and Wikipedia. 
+From the former I got the episode rating and summary (which I will later use for text analysis), while from the latter I got the number of viewers on air date (US) of each episode.
+Let's start by loading all the packages needed for the project.
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rvest)
+library(lubridate)
+library(janitor)
+library(ggthemes)
+library(plotly)
+library(tidytext)
+library(tm)
+library(forcats)
+library(wordcloud)
+library(textdata)
+library(prettydoc)
+library(radarchart)
+```
+
+The following code scrapes the IMDB website and create a first dataframe with the data obtained. I have used the `html_nodes()` function from the `rvest` package, which pass the html name or attribute of each section of the webpage, which can be obtained directly from your browser by right-clicking on the web page's portion you are interested in, and selecting *inspect*.
+
+```{r IMBD_scraping, message=FALSE, warning=FALSE}
+jtv_episodes <- c()
+for(k in 1:5){
+  url <- paste0("https://www.imdb.com/title/tt3566726/episodes?season=", k)
+  jtv_html <- read_html(url)
+  episode_number <- jtv_html %>%
+    html_nodes('.image') %>%
+    html_text()
+  episode_airdate <- jtv_html %>%
+    html_nodes('.airdate') %>%
+    html_text()
+  episode_title <- jtv_html %>%
+    html_nodes('.info strong a') %>%
+    html_attr("title")
+  episode_rating <- jtv_html %>%
+    html_nodes('.ipl-rating-star.small .ipl-rating-star__rating') %>%
+    html_text()
+  episode_votes <- jtv_html %>%
+    html_nodes('.ipl-rating-star__total-votes') %>%
+    html_text()
+  episode_summary <- jtv_html %>%
+    html_nodes('.item_description') %>%
+    html_text()
+  assign(paste("jtv_episodes", k, sep = "_"), cbind(episode_number, episode_airdate, episode_title, episode_rating, episode_votes, episode_summary)) 
+}
+
+# Collect episodes for each season in the same df
+jtv_episodes <- rbind(jtv_episodes_1, jtv_episodes_2, jtv_episodes_3, jtv_episodes_4, jtv_episodes_5)
+jtv_episodes <- as.data.frame(jtv_episodes)
+
+# Clean the data frame (data type, add separate column for season and episode)
+jtv_episodes <-jtv_episodes %>%
+  mutate(episode_airdate = dmy(episode_airdate),
+         episode_rating = as.numeric(as.character(episode_rating)),
+         episode_votes = parse_number(as.character(episode_votes)),
+         episode_summary = as.character(episode_summary),
+         number = c(1:100)) 
+jtv_episodes <- jtv_episodes %>%
+  separate(col = episode_number, into = c("season", "episode"), sep = ",")
+
+jtv_episodes <- jtv_episodes %>%
+  mutate(episode_number = parse_number(episode),
+         season = str_replace(season, "S", "Season "))
+```
+
+The next piece of code scrapes the Wikipedia website of each season. Here, rather than the html node, I used the Xpath notation to refer to the elements of interest. You can access it by righ-clicking on the html node, select *copy* and then *copy Xpath*. As here I am interested in the viewers tables, I then added `html_table(fill = TRUE)` so that the data is directly stored into a table format in my R session.
+For the web scraping code, I highly reccoment to follow Harry Anderson's Medium post linked in the introduction.
+
+```{r Wiki_scraping, message=FALSE, warning=FALSE}
+urlw <- ("https://en.wikipedia.org/wiki/List_of_Jane_the_Virgin_episodes")
+s1 <- urlw %>%
+  read_html() %>%
+  html_node(xpath = '//*[@id="mw-content-text"]/div[1]/table[2]') %>%
+  html_table(fill = TRUE)
+s2 <- urlw %>%
+  read_html() %>%
+  html_node(xpath = '//*[@id="mw-content-text"]/div[1]/table[3]') %>%
+  html_table(fill = TRUE)
+s3 <- urlw %>%
+  read_html() %>%
+  html_node(xpath = '//*[@id="mw-content-text"]/div[1]/table[4]') %>%
+  html_table(fill = TRUE)
+s4 <- urlw %>%
+  read_html() %>%
+  html_node(xpath = '//*[@id="mw-content-text"]/div[1]/table[5]') %>%
+  html_table(fill = TRUE)
+s5 <- urlw %>%
+  read_html() %>%
+  html_node(xpath = '//*[@id="mw-content-text"]/div[1]/table[6]') %>%
+  html_table(fill = TRUE)
+
+#Join and clean dataframes (change data type and remove useless columns)
+jtv_episodes_wiki <- rbind(s1, s2, s3, s4, s5)
+jtv_episodes_wiki <- as.data.frame(jtv_episodes_wiki)
+jtv_episodes_wiki <- jtv_episodes_wiki %>%
+  clean_names()
+jtv_episodes_wiki <- jtv_episodes_wiki %>%
+  mutate(viewers = parse_number(u_s_viewers_millions)) %>%
+  select(-u_s_viewers_millions, -no_inseason, -title, -original_air_date)
+```
+
+The following step is to join the two data sets together, as to have a unique data frame for further analysis and to build the data viz.
+
+```{r dataframe, message=FALSE, warning=FALSE}
+# merge Wikipedia and IMBD data in single data frame
+jtv <- left_join(jtv_episodes, jtv_episodes_wiki, by = c("number" = "no_overall"))
+```
+
+## Data viz
+At this point I am ready to make first plots: episode rating and viewers per episode.
+As I really liked the style of Katie Segreti's plot and had never used the `ggthemes` package, I tought this could be a good chance to try it out and thus I kept a format that is very similar to her own.
+
+```{r plot_rating, fig.width=8,fig.height=5, message=FALSE, warning=FALSE}
+jtv %>%
+  ggplot(aes(x = episode_number, y = episode_rating, fill = season, size = episode_votes)) +
+  geom_point(shape = 22) +
+  geom_text(aes(label = episode_title), size = 2.5, angle = -90, hjust = 0, nudge_y = -0.08) +
+  facet_grid(~season) +
+  theme_wsj() +
+  ylim(3, 10) +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the Virgin episodes ranked by IMDB",
+       subtitle = "Square size is proportional to number of votes") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.subtitle = element_text(size = 10),
+        plot.title = element_text(size = 16))
+```
+
+From the plot we can see that the rating is pretty consisten throughout the whole show, with each season finale having a generally higher rating than the other episodes of the same season. We can also notice that there is a rating decrease in the last season. We can see this better by averaging all the espisode's ratings by season, and compare them.
+
+```{r season rating, message=FALSE, warning=FALSE}
+jtv %>%
+  group_by(season) %>%
+  mutate(avg_rating = mean(episode_rating),
+         avg_votes = mean(episode_votes)) %>%
+  select(season, avg_rating, avg_votes) %>%
+  distinct() %>%
+  ggplot(aes(x = season, y = avg_rating, fill = season, size = avg_votes)) +
+  geom_point(shape = 22) +
+  geom_text(aes(label = season), size = 3, angle = -90, hjust = -0.25, vjust = 0.1) +
+  theme_wsj() +
+  ylim(3, 10) +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the Virgin seasons ranked by IMDB",
+       subtitle = "Square size is proportional to number of votes") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.subtitle = element_text(size = 10),
+        plot.title = element_text(size = 16))
+
+  
+```
+
+It seems that going from season 1 to 5, there is a small decline in ratings, as well as the number of votes - which as we are about to see, actually correlates with the viewers on airdate, and generylly hints to a decrease in audience engagement with time.
+
+```{r plot_viewers, fig.width=8,fig.height=5, message=FALSE, warning=FALSE}
+jtv %>%
+  arrange(number) %>%
+  filter(!is.na(viewers)) %>%
+  ggplot(aes(x = episode, y = viewers, fill = season)) +
+  geom_col(color = "black") +
+  facet_grid(~season, scales = "free_x") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the Virgin episodes viewers",
+       subtitle = "Million of US viewers on airdate") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.subtitle = element_text(size = 10),
+        plot.title = element_text(size = 16))
+```
+
+The number of viewers on airdate is almost halved going from the first to the last season. Did people get bored of the show? Well, I personally find this surptising, as I was basically hooked since episode one and was unable to put the show down (..but I also recognize that not everyone is an obsessional person).
+Of course the viewers on airdate are only a small portion of the people who actually saw the show, and with *Jane* being now available on Netflix, it could be that the trend is not fully representative.
+
+
+## Text mining
+
+Another information I scraped from IMBD is the episode synopsis, which gives a brief summary of each episode: the main characters appearing and the main events.
+I thought to use this data to get first a glimpse of the most frequently mentioned cahracters (as done by Katie Segreti) and then to run some deeper analysis to understand the main themes recurring through the show as well as their sentimental character.
+
+Text analysis is a complex subject which is entirely dependent on the type and quality of your text data (well, like pretty much any analysis) - in this case, the summary is a rather brief and certanily incomplete source, and any conclusion must be taken for what it is.
+
+I started by using the `tidytext` package, which store text data in a tidy format, with one word per row, so that it can be analysed using the various functions of the `tidyverse` library.
+After obtaining a word variable with `unnest_tokens()`, in order to obtain a chart with the most popular chgaracters, I used the `filter()` function to retain the names of the show's main characters and calculate their recurrence.
+
+```{r characters, message=FALSE, warning=FALSE}
+# Prepare dataset
+characters_jtv <- jtv %>%
+  unnest_tokens(word, episode_summary) %>% 
+  filter(word %in% c("jane", "michael", "xo", "alba", "rafael", "mateo", "petra", "rogelio")) %>%
+  count(word) %>%
+  arrange(desc(n))
+
+# Plot characetr frequency
+characters_jtv %>%
+  ggplot(aes(x = fct_reorder(as.factor(word), n, .desc = TRUE), y = n, fill =word)) +
+  geom_col(col = "black") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Characters popularity",
+       subtitle = "Charaters total mentions in IMBD episode summaries") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14))
+```
+
+I find quite surprising that Xo and Alba rank so low in mentions, but that could just be because they are more present in the more introspective/mundane scenes of the show, which likely do not get mentioned in a brief summary such as the ones I am working with.
+The fact that Rogelio's bar ended up being purple means that not customizing the colors was just the right choice to make (show's fans will understand this statement).
+
+The next step is to identify the main themes, and how common they are across the different seasons. For the sake of practice, this time I decided to use a different analysis method, which make use the `tm` package. 
+The `tm` package works with corpuses (list of text elements), and the analysis workflow consist in: 
+
+- transform tha data frame into a corpus
+- clean the corpus
+- transform the corpus into a document term matrix or DTM (a matrix where each row is a document and each column in a word, and the values are the number of times the word has in each document)
+- transformed the DTM in a matrix
+- Sum the matrix rows to obtain the frequency of each word
+- converted the data back to a data frame format for data viz (if needed)
+
+The process is a bit more tedious than the tidy text approach, but it can be useful if you want to apply machine learning models to the data. It is possible to transform tidy text data in DTM and vice versa, and I recommend [chapter 5](https://www.tidytextmining.com/dtm.html) of the *"Text Mining with R"* book for a complete explanation of how this is done.
+
+```{r, text mining, message=FALSE, warning=FALSE}
+# Prepare data frame to make corpus
+jtv_text <- jtv %>%
+  select(season, episode, episode_summary)
+jtv_text <- jtv_text[, c(2,3,1)]
+jtv_text <- jtv_text %>%
+  rename(doc_id = episode, text = episode_summary)
+
+# transform dataframe into corpus
+jtv_corpus <- VCorpus(DataframeSource(jtv_text))
+
+# Clean the corpus
+# Make a function to clean corpus
+clean_corpus <- function(corpus) {
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, words = c(stopwords("en"), "isnt", "xos", "rafeal", "jrs", "jorge", "might",  "raphael", "darci", "adam", "luisa", "also", "american", "still", "will", "petras", "michaels", "band", "things","takes", "rogelios", "river", "dier","day", "brett", "make", "decides", "star", "try", "guest", "find", "finds", "doesnt", "finally", "rafaels", "navedo", "coll", "ivonne",  "makes", "jaime", "big", "andrea", "back", "camil", "grobglas", "yael", "get", "gets","jane", "michael", "xo", "alba", "rafael", "mateo", "petra", "rogelio", "janes", "justin", "baldoni", "meanwhile", "rodriguez", "gina"))
+  corpus <- tm_map(corpus, stripWhitespace)
+  return(corpus)
+  }
+
+# Word frequency for all series
+jtv_m <- as.matrix(TermDocumentMatrix(clean_corpus(jtv_corpus)))
+jtv_term_freq <- sort(rowSums(jtv_m), decreasing = TRUE)
+jtv_term_freq_df <-data.frame(term = rownames(as.data.frame(jtv_term_freq)), as.data.frame(jtv_term_freq))
+```
+
+As you can see from the code, there is a vast list of words that I decided to exclude besides the most common stopwords. They are mostly character's or actor's names as well as other non significant words such as "will" or "finally". Of course this word choice is entirely arbitrary - and arguably correct - but the aim of my analysis was to capturte the main themes rather than the overall most frequently used terms, and that's what I felt like resulted in a fairly representative output (at least from my very biased point of view).
+
+```{r, themes plot, message=FALSE, warning=FALSE}
+ggplot(jtv_term_freq_df[1:15, ], 
+       aes(x = fct_reorder(as.factor(term), jtv_term_freq, .desc = TRUE), y = jtv_term_freq)) +
+         geom_col(color = "black", fill = "mediumpurple1") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the Virgin main themes",
+       subtitle = "Top 15 words mentioned in IMBD episode summary") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 16),
+        plot.subtitle = element_text(size = 14))
+```
+
+I then decided to use wordclouds to see which themes are commmon between the five seasons and which ones are not. Wordclouds might not be the most informative way to represent words frequency, but once again, for the sake of practice I wanted to do at least a couple of them.
+
+I thus collected all the 5 seasons texts and collapsed them into one single data frame, and then applied the functions `commonality.cloud()` and `comparion.cloud()` to see the results.
+
+```{r text mining 2, message=FALSE, warning=FALSE}
+#Do a communality cloud
+all_1 <- paste(as.data.frame(jtv_episodes_1)$episode_summary, collapse = " ")
+all_2 <- paste(as.data.frame(jtv_episodes_2)$episode_summary, collapse = " ")
+all_3 <- paste(as.data.frame(jtv_episodes_3)$episode_summary, collapse = " ")
+all_4 <- paste(as.data.frame(jtv_episodes_4)$episode_summary, collapse = " ")
+all_5 <- paste(as.data.frame(jtv_episodes_5)$episode_summary, collapse = " ")
+
+all <- c(all_1, all_2, all_3, all_4, all_5)
+all_m <- as.matrix(TermDocumentMatrix(clean_corpus(VCorpus(VectorSource(all)))))
+
+# Find words in common of 5 seasons 
+comm_c <- commonality.cloud(all_m, max.words = 100, colors ="mediumpurple1")
+```
+
+```{r text wordcloud, message=FALSE, warning=FALSE}
+# words not in common
+comp_c <- comparison.cloud(all_m, max.words = 100, 
+                 colors = c("mediumpurple1", "grey", "gold", "orange", "pink"))
+```
+
+## Sentiment analysis
+
+Jane is all about feelings, so this seemed like literally the most appropriate type of analysis to run.
+In a nutshell, sentiment analysis compare the terms in a text with the ones contaned in a pre-defined lexicon, and assign them accordingly a sentiment or a score.
+For my analysis, I used three different lexicons (or dictionaries):
+
+* NRC: classify words with respect to 10 main sentiments
+* Bing: classify words as negative or positive
+* Afinn: score words within a scale from -5 (very negative) to +5 (very positive)
+
+I started by analyzing what were the most prevalent sentiments in each season.
+
+```{r sentiment analysis, message=FALSE, warning=FALSE}
+# Do sentiment analysis with tidytext
+# Sentiments in different seasons using the nrc dictionary
+jtv_sent_n <- jtv %>%
+  group_by(season) %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("nrc")) %>%
+  count(sentiment)
+  
+
+ggplot(jtv_sent_n, aes(x = sentiment, y = n, fill = season)) +
+  geom_col() +
+  facet_grid(~season) +
+  geom_text(aes(label = sentiment), size = 3, angle = 90, hjust = -0.1, nudge_y = -0.08) +
+  theme_wsj() +
+  ylim(0,90) +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the virgin sentiment analysis (NRC Dictionary)",
+       subtitle = "Sentiments frequency in Jane the virgin season") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 14),
+        plot.subtitle = element_text(size = 12))
+```
+
+While using the NRC lexicon, it seems that the sentiment ditribution in the five different seasons is pretty homogeneous, with a predominance of "positive", "trust" and (unsurprisingly!) "anticipation".
+
+If we remove *positive* and *negative* from the NRC lexicon, we are left with the 8 emotions of [Plutchik's wheel of emotions](https://en.wikipedia.org/wiki/Robert_Plutchik#Plutchik's_wheel_of_emotions). Another way to represent the results is to make use of a *radar chart*, that can be built with the `radarchart` package, in an interactive form.
+
+```{r}
+scores <- jtv %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("nrc")) %>%
+  filter(!grepl("positive|negative", sentiment)) %>%
+  count(season, sentiment) %>%
+  spread(season, n)
+  
+# JavaScript radar chart
+chartJSRadar(scores, showToolTipLabel=TRUE)
+```
+
+
+```{r season sentiments bing, message=FALSE, warning=FALSE}
+# Sentiments in different seasons using the Bing dictionary
+jtv_sent_b_overall <- jtv %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(index = season, sentiment) %>%
+  spread(sentiment, n) %>%
+  mutate(total = positive-negative)
+
+ggplot(jtv_sent_b_overall, aes(x = index, y = total, fill = index)) +
+  geom_col(color="black") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the virgin sentiment analysis (Bing dictionary)",
+       subtitle = "Total sentiment score per season") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_text(size = 12, vjust = 10),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 14),
+        plot.subtitle = element_text(size = 12))
+```
+
+The Bing lexicon yields to negative sentiments being the most prevalent in every season, with season 1 having the lowest score and season 4 the highest.
+
+```{r season sentiments afinn, message=FALSE, warning=FALSE}
+# Sentiments in different seasons using the Afinn dictionary
+jtv_sent_a <- jtv %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("afinn")) %>%
+  group_by(season) %>%
+  mutate(sentiment = sum(value)) %>%
+  select(season, sentiment) %>%
+  distinct()
+
+
+ggplot(jtv_sent_a, aes(x = season, y = sentiment, fill = season)) +
+  geom_col(color="black") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the virgin sentiment analysis (Afinn dictionary)",
+       subtitle = "Total sentiment score per season") +
+  theme(legend.position = "none",
+    panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_text(size = 12, vjust = 10),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 14),
+        plot.subtitle = element_text(size = 12))
+```
+
+The Afinn dictinary yields to some season being overall positive and others overall negative, with a trend that is quite similar (with the exception of season 2) to what was obtained with the Bing dictionary.
+
+
+Beside seeing the average sentiment per season, I also wanted to monitor the score of each espisode, and build a detailed timeline of the sequence of emotions trhoughout the show.
+To do that, I decided to use only the Bing and Afinn dictionary, as it was difficul to attribute a score to the sentiments of the NRC one.
+
+```{r}
+# Do a sentiment timeline
+# Bing dictionary
+jtv_sent_tb <- jtv %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(index = number, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive-negative) %>%
+  select(index, sentiment)
+
+ggplot(jtv_sent_tb, aes(x = index, y = sentiment)) +
+ geom_line(color = "mediumpurple1", size = 0.6) +
+  geom_point(colour = "mediumpurple1", alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the virgin sentiment timeline (Bing dictionary)",
+       subtitle = "Total sentiment score per episode") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 14),
+        plot.subtitle = element_text(size = 12))
+  
+# Afinn dictionary 
+jtv_sent_ta <- jtv %>%
+  select(number, episode_summary) %>%
+  unnest_tokens(word, episode_summary) %>%
+  anti_join(stop_words) %>%
+  inner_join(get_sentiments("afinn")) %>%
+  group_by(number) %>%
+  mutate(sentiment = sum(value)) %>%
+  select(number, sentiment) %>%
+  distinct()
+
+ggplot(jtv_sent_ta, aes(x = number, y = sentiment)) +
+  geom_line(color = "mediumpurple1", size = 0.6) +
+  geom_point(colour = "mediumpurple1", alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm") +
+  theme_wsj() +
+  labs(x = " ",
+       y = " ",
+       title = "Jane the virgin sentiment timeline (Afinn dictionary)",
+       subtitle = "Total sentiment score per episode") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"),
+        strip.background = element_rect(fill = "white"),
+        axis.text.x = element_blank(),
+        axis.line.x.bottom = element_blank(),
+        axis.ticks.x.bottom = element_blank(),
+        plot.title = element_text(size = 14),
+        plot.subtitle = element_text(size = 12))
+```
+
+Well, the rusult is very much what I expected from this show: a rollercoster of emotions!
+While the Afinn lexicon is built upon and thus yields to a larger sentiment variation, both the timlines are trending slightly upwards, indicating a happy progression of the show (I am not sure that that is the case, but for sure we have a happy ending).
+
+## Conclusions
+The project was superfun and a great way to practice the latest data stuff I have learned. 
+It also gave me the chance to revel in my *Jane* obsession one more time, and I feel that this is not going to be the last one `r knitr::asis_output("\U1F603")`
+
+###### Valentina Valmacco, 5 April 2021
